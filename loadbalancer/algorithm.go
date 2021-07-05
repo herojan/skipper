@@ -40,6 +40,7 @@ const (
 const powerOfRandomNChoicesDefaultN = 2
 
 const ConsistentHashKey = "consistentHashKey"
+const ConsistentHashBalanceFactor = "consistentHashBalanceFactor"
 
 var (
 	algorithms = map[Algorithm]initializeAlgorithm{
@@ -214,7 +215,7 @@ func (h hasher) Sum64(data []byte) uint64 {
 }
 func newConsistentHash(endpoints []string) routing.LBAlgorithm {
 	cfg := consistent.Config{
-		PartitionCount:    29,
+		PartitionCount:    len(endpoints),
 		ReplicationFactor: 20,
 		Load:              1.25,
 		Hasher:            hasher{},

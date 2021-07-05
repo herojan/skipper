@@ -287,7 +287,8 @@ func TestApply(t *testing.T) {
 func TestConsistentHashSearch(t *testing.T) {
 	apply := func(key string, endpoints []string) string {
 		ch := newConsistentHash(endpoints).(consistentHash)
-		return endpoints[ch.search(key)]
+		m := ch.hashRing.LocateKey([]byte(key)).(hashRingMember)
+		return endpoints[m.endpointIndex]
 	}
 
 	endpoints := []string{"http://127.0.0.1:8080", "http://127.0.0.2:8080", "http://127.0.0.3:8080"}
@@ -329,16 +330,35 @@ func TestConsistentHashKey(t *testing.T) {
 
 	defaultEndpoint := ch.Apply(&routing.LBContext{Request: r, Route: rt, Params: make(map[string]interface{})})
 	remoteHostEndpoint := ch.Apply(&routing.LBContext{Request: r, Route: rt, Params: map[string]interface{}{ConsistentHashKey: net.RemoteHost(r).String()}})
-
+	otherEndpoint := ch.Apply(&routing.LBContext{Request: r, Route: rt, Params: map[string]interface{}{ConsistentHashKey: "some_key"}})
 	if defaultEndpoint != remoteHostEndpoint {
 		t.Error("remote host should be used as a default key")
 	}
+	if otherEndpoint == defaultEndpoint {
+		t.Error("The test key should have returned a different endpoint to the default key")
+	}
+}
 
-	for i, ep := range endpoints {
-		key := ep // key equal to endpoint has the same hash and therefore selects it
-		selected := ch.Apply(&routing.LBContext{Request: r, Route: rt, Params: map[string]interface{}{ConsistentHashKey: key}})
-		if selected != rt.LBEndpoints[i] {
-			t.Errorf("expected: %v, got %v", rt.LBEndpoints[i], selected)
-		}
+func TestConsistentHashBoundedLoadDistribution(t *testing.T) {
+	endpoints := []string{"http://127.0.0.1:8080", "http://127.0.0.2:8080", "http://127.0.0.3:8080"}
+	r, _ := http.NewRequest("GET", "http://127.0.0.1:1234/foo", nil)
+	route := NewAlgorithmProvider().Do([]*routing.Route{{
+		Route: eskip.Route{
+			BackendType: eskip.LBBackend,
+			LBAlgorithm: ConsistentHash.String(),
+			LBEndpoints: endpoints,
+		},
+	}})[0]
+	ch := route.LBAlgorithm.(consistentHash)
+	ctx := &routing.LBContext{Request: r, Route: route, Params: map[string]interface{}{ConsistentHashBalanceFactor: 1.25}}
+
+	for i := 0; i < 100; i++ {
+		ep := ch.Apply(ctx)
+		ep.Metrics.IncInflightRequest() // done by proxy
+
+		t.Logf("%d %d %d",
+			route.LBEndpoints[ch.hashRing.GetMembers()[0].(hashRingMember).endpointIndex].Metrics.GetInflightRequests(),
+			route.LBEndpoints[ch.hashRing.GetMembers()[1].(hashRingMember).endpointIndex].Metrics.GetInflightRequests(),
+			route.LBEndpoints[ch.hashRing.GetMembers()[2].(hashRingMember).endpointIndex].Metrics.GetInflightRequests())
 	}
 }

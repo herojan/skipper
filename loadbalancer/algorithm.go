@@ -6,10 +6,11 @@ import (
 	"math"
 	"math/rand"
 	"net/url"
-	"sort"
 	"sync"
 	"time"
 
+	"github.com/buraksezer/consistent"
+	"github.com/cespare/xxhash/v2"
 	log "github.com/sirupsen/logrus"
 	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/net"
@@ -194,40 +195,41 @@ func (r *random) Apply(ctx *routing.LBContext) routing.LBEndpoint {
 }
 
 type (
-	endpointHash struct {
-		index int    // index of endpoint in endpoint list
-		hash  uint32 // hash of endpoint
+	consistentHash struct {
+		hashRing consistent.Consistent
 	}
-	consistentHash []endpointHash // list of endpoints sorted by hash value
+	hashRingMember struct {
+		endpointIndex int
+		endpointHost  string
+	}
+	hasher struct {
+	}
 )
 
-func (ch consistentHash) Len() int           { return len(ch) }
-func (ch consistentHash) Less(i, j int) bool { return ch[i].hash < ch[j].hash }
-func (ch consistentHash) Swap(i, j int)      { ch[i], ch[j] = ch[j], ch[i] }
-
+func (m hashRingMember) String() string {
+	return string(m.endpointHost)
+}
+func (h hasher) Sum64(data []byte) uint64 {
+	return xxhash.Sum64(data)
+}
 func newConsistentHash(endpoints []string) routing.LBAlgorithm {
-	ch := consistentHash(make([]endpointHash, len(endpoints)))
-	for i, ep := range endpoints {
-		ch[i] = endpointHash{i, hash(ep)}
+	cfg := consistent.Config{
+		PartitionCount:    29,
+		ReplicationFactor: 20,
+		Load:              1.25,
+		Hasher:            hasher{},
 	}
-	sort.Sort(ch)
-	return ch
+	c := consistent.New(nil, cfg)
+	for i, ep := range endpoints {
+		c.Add(hashRingMember{i, ep})
+	}
+	return consistentHash{*c}
 }
 
 func hash(s string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(s))
 	return h.Sum32()
-}
-
-// Returns index of endpoint with closest hash to key's hash
-func (ch consistentHash) search(key string) int {
-	h := hash(key)
-	i := sort.Search(ch.Len(), func(i int) bool { return ch[i].hash >= h })
-	if i == ch.Len() { // rollover
-		i = 0
-	}
-	return ch[i].index
 }
 
 // Apply implements routing.LBAlgorithm with a consistent hash algorithm.
@@ -240,9 +242,9 @@ func (ch consistentHash) Apply(ctx *routing.LBContext) routing.LBEndpoint {
 	if !ok {
 		key = net.RemoteHost(ctx.Request).String()
 	}
-	choice := ch.search(key)
+	choice := ch.hashRing.LocateKey([]byte(key)).(hashRingMember)
 
-	return ctx.Route.LBEndpoints[choice]
+	return ctx.Route.LBEndpoints[choice.endpointIndex]
 }
 
 type powerOfRandomNChoices struct {
